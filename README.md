@@ -1,97 +1,137 @@
-# Pipeline de Processamento e Enriquecimento de Dados de Prospecção (4 Etapas)
+# Pipeline de Prospecção — AutomacaoBandaLarga
 
-Este repositório contém um conjunto de scripts em Python projetados para automatizar e otimizar um pipeline de dados de prospecção (leads/prospects). O objetivo é pegar dados brutos, filtrá-los, enriquecê-los com informações de CNPJ/empresa e validar os contatos (operadora de telefone), preparando-os para o time comercial em um formato segmentado.
+Pipeline modular em Python para processar, enriquecer e segmentar dados de prospecção. Cada etapa consome a saída da anterior.
 
+---
 
-## Arquitetura do Projeto
+## Fluxo do Pipeline
 
-O pipeline é modular e sequencial, garantindo que cada etapa se baseie nos dados processados da etapa anterior, culminando na separação final por operadora de telefonia.
+```
+CSV bruto → [1] Separação → [2] Consulta CNPJ → [3/4] Operadora → CSVs por operadora
+```
 
-1. Separação e Classificação (prospect_separator.py)
+| Etapa | Script | Entrada | Saída |
+|-------|--------|---------|-------|
+| 1 | `1 - SeparacaoProspect/separador.py` | CSVs em `dados_prospect/` | Excel MEI / Demais |
+| 2 | `2 - ConsultaCnpj/ConsultaCnpj.py` | Excel em `Consultar/` | Excel enriquecido em `Consultado/` |
+| 3 | `3 - Consulta_operadora/consulta-operadora.py` | Excel em `arquivos_de_entrada/` | Excel com coluna Operadora |
+| 4 | `4 - ArquivoDiscadora/separador_operadora.py` | Excel em `entrada/` | CSVs por operadora em `saida/` |
 
-Filtra os dados de prospecção com base na análise de crédito (ENRIQUECIMENTO) e separa-os em grupos estratégicos (MEI, Demais, etc.) em arquivos Excel.
+---
 
-2. Enriquecimento de CNPJ e Endereço (cnpj_consultor.py)
+## Configuração
 
-Consulta uma API externa (com controle de limite de taxa e cache) para enriquecer os dados com informações detalhadas da empresa (Razão Social, Endereço, Situação Cadastral), usando o CNPJ como chave.
+### 1. Instalar dependências
 
-3. Validação de Contato (operadora_checker.py - Versão anterior)
+Cada script tem seu próprio `requirements.txt` com apenas o necessário:
 
-Esta etapa é substituída e aprimorada pelo Script 4, que realiza a separação final.
+```bash
+pip install -r "1 - SeparacaoProspect/requirements.txt"
+pip install -r "2 - ConsultaCnpj/requirements.txt"
+pip install -r "3 - Consulta_operadora/requirements.txt"
+pip install -r "4 - ArquivoDiscadora/requirements.txt"
+```
 
-4. Separação Final por Operadora (final_separator_operadora.py)
+Ou instale tudo de uma vez:
 
-Processa os números de telefone (incluindo correção inteligente do dígito '9' para celulares antigos) e, crucialmente, separa o resultado final em múltiplos arquivos CSV, um para cada operadora ou tipo de linha (VIVO, CLARO, LINHA FIXA, etc.).
+```bash
+pip install pandas openpyxl xlsxwriter requests tqdm phonenumbers python-dotenv
+```
 
-Como Configurar e Rodar o Projeto
+### 2. Configurar variáveis de ambiente (obrigatório para o Script 2)
 
------------------------------------------------------------------------------------------------------
+```bash
+# Copie o template e preencha com seus valores
+cp .env.example .env
+```
 
-1. Pré-requisitos
+Edite o `.env`:
+```
+CNPJ_API_KEY=sua_chave_aqui
+CNPJ_API_URL=https://api.seuservico.com/v1/cnpj
+```
 
-Você precisa ter o Python 3.x instalado e as seguintes bibliotecas:
+> O arquivo `.env` já está no `.gitignore`. Nunca commite credenciais reais.
 
-pip install pandas requests tqdm phonenumbers openpyxl xlsxwriter
+---
 
-----------------------------------------------------------------------------------------------------
-2. Estrutura de Pastas
+## Execução
 
-O projeto utiliza diferentes pastas de entrada/saída em cada etapa. Garanta a existência das seguintes pastas:
+### Passo 1 — Separação e Classificação
 
+Coloque os CSVs brutos em `1 - SeparacaoProspect/dados_prospect/` e execute:
+
+```bash
+python "1 - SeparacaoProspect/separador.py"
+```
+
+Saída: arquivos `Prospect XX - MEI.xlsx` e `Prospect XX - Demais clientes.xlsx` na mesma pasta.
+
+Mova os Excel gerados para `2 - ConsultaCnpj/Consultar/`.
+
+---
+
+### Passo 2 — Enriquecimento de CNPJ
+
+```bash
+python "2 - ConsultaCnpj/ConsultaCnpj.py"
+```
+
+Saída: Excel enriquecido em `2 - ConsultaCnpj/Consultado/`.
+
+- Usa cache com TTL de 30 dias (configurável via `CACHE_TTL_DAYS` no `.env`)
+- CNPJs com falha são salvos em arquivo `_falhas_*.txt`
+
+Mova os Excel enriquecidos para `4 - ArquivoDiscadora/entrada/`.
+
+---
+
+### Passo 3 (opcional) — Consulta de Operadora simples
+
+Se quiser apenas adicionar a coluna de operadora sem separar por arquivo:
+
+```bash
+python "3 - Consulta_operadora/consulta-operadora.py"
+```
+
+---
+
+### Passo 4 — Separação Final por Operadora
+
+```bash
+python "4 - ArquivoDiscadora/separador_operadora.py"
+```
+
+Saída: CSVs separados por operadora em `4 - ArquivoDiscadora/saida/`  
+Ex: `Prospect_BA__VIVO.csv`, `Prospect_BA__CLARO.csv`, `Prospect_BA__LINHA_FIXA.csv`
+
+---
+
+## Estrutura do Projeto
+
+```
 .
-├── prospect_separator.py
-├── cnpj_consultor.py
-├── final_separator_operadora.py (Novo Script 4)
-├── dados_prospect/ (Entrada P1, Saída P1)
-├── Consultar/ (Entrada P2)
-├── Consultado/ (Saída P2)
-├── entrada/ (Entrada P4)
-├── saida/ (Saída P4 - CSVs separados por operadora)
-└── Dados do cokpit/
-└── Logs/ (Logs e Cache do P2)
+├── .env.example                  # Template de configuração
+├── utils/
+│   ├── telefone.py               # Verificação de operadora (compartilhado entre scripts 3 e 4)
+│   └── rate_limiter.py           # Rate limiter thread-safe (usado pelo script 2)
+├── 1 - SeparacaoProspect/
+├── 2 - ConsultaCnpj/
+├── 3 - Consulta_operadora/
+└── 4 - ArquivoDiscadora/
+```
 
-----------------------------------------------------------------------------------------------------------------------
-3. Configurações e Chaves
+---
 
-Script 1 (prospect_separator.py): MANDATÓRIO ajustar a variável CAMINHO_BASE_CODIGO para o caminho absoluto da pasta onde o código está.
+## Variáveis de Ambiente Disponíveis
 
-Script 2 (cnpj_consultor.py): MANDATÓRIO preencher a API_KEY e a URL de consulta da API no topo do arquivo.
-
-
-----------------------------------------------------------------------------------------------------------------------
-
-Guia de Execução do Pipeline (Passo a Passo)
-
-A execução deve ser feita sequencialmente para garantir o fluxo de dados correto.
-
-Passo 1: Separação e Classificação
-
-Coloque seus arquivos CSV brutos na pasta dados_prospect/.
-
-Execute:
-python prospect_separator.py
-
-Próxima Etapa: Mova os novos arquivos Excel (Ex: Propect BA - MEI.xlsx) de dados_prospect/ para a pasta Consultar/.
-
---------------------------------------------------------------------------------------------------------------------
-Passo 2: Enriquecimento de CNPJ
-
-Certifique-se de que a chave da API está configurada.
-
-Execute:
-python cnpj_consultor.py
-(A barra de progresso tqdm será exibida).
-
-Próxima Etapa: Mova os arquivos Excel enriquecidos (Ex: Propect BA - MEI_consultado_20251125_140000.xlsx) da pasta Consultado/ para a pasta entrada/.
-
---------------------------------------------------------------------------------------------------------------------
-Passo 3: Separação Final por Operadora
-
-Coloque os arquivos do Passo 2 na pasta entrada/.
-
-Execute o script final:
-python final_separator_operadora.py
-
-Resultado Final: A pasta saida/ conterá múltiplos arquivos CSV, um para cada categoria (Ex: Leads__VIVO.csv, Leads__LINHA_FIXA.csv, Leads__INVALIDO.csv), prontos para uso.
-
-final_separator_operadora.py é uma ferramenta de pós-processamento de alta qualidade que transforma dados de contato brutos em informações acionáveis, incorporando inteligência específica para o tratamento de números de telefone do Brasil.
+| Variável | Padrão | Descrição |
+|----------|--------|-----------|
+| `CNPJ_API_KEY` | — | Chave da API de consulta CNPJ (obrigatório) |
+| `CNPJ_API_URL` | — | URL base da API (obrigatório) |
+| `MAX_REQUESTS_PER_MINUTE` | `900` | Limite de requisições por minuto |
+| `REQUEST_TIMEOUT` | `10` | Timeout em segundos por requisição |
+| `MAX_WORKERS` | `10` | Threads paralelas para consulta |
+| `CACHE_TTL_DAYS` | `30` | Dias até expirar cache de CNPJ |
+| `CNPJ_COLUMN` | `DOCUMENTO` | Nome da coluna de CNPJ nos arquivos |
+| `LOG_LEVEL` | `INFO` | Nível de log (`DEBUG`, `INFO`, `WARNING`) |

@@ -1,187 +1,116 @@
 import pandas as pd
 from tqdm import tqdm
 import os
-import phonenumbers
-from phonenumbers import carrier
-from phonenumbers.phonenumberutil import number_type, PhoneNumberType
-import time
+import sys
+import logging
+from pathlib import Path
 
-# Permite que o Pandas use a barra de progresso
+# Importa função compartilhada (evita duplicação com Script 3)
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from utils.telefone import verificar_operadora
+
 tqdm.pandas()
 
 # --- Configurações ---
-INPUT_FOLDER = "entrada" # Pasta onde você deve colocar seus arquivos Excel
-OUTPUT_FOLDER = "saida"  # Pasta onde os arquivos CSV serão salvos, separados por operadora
-# A coluna com o número de telefone bruto/completo para processamento
-TELEFONE_COLUMN_HINT = "TELEFONE" 
-# Ordem das colunas na saída
+SCRIPT_DIR    = Path(__file__).parent
+INPUT_FOLDER  = SCRIPT_DIR / "entrada"
+OUTPUT_FOLDER = SCRIPT_DIR / "saida"
+TELEFONE_COLUMN_HINT = "TELEFONE"
+
 COLUNAS_DESEJADAS = [
-    'CNPJ',
-    'RazaoSocial',
-    'EnderecoCompleto',
-    'Email',
-    'Operadora',
-    'Telefone' # Será renomeado a partir da coluna TELEFONE_COLUMN_HINT
+    'CNPJ', 'RazaoSocial', 'EnderecoCompleto',
+    'Email', 'Operadora', 'Telefone'
 ]
 
+INPUT_FOLDER.mkdir(exist_ok=True)
+OUTPUT_FOLDER.mkdir(exist_ok=True)
 
-# --- Função de Verificação de Operadora (Corrigida e Robusta) ---
-def verificar_operadora(numero):
-    """
-    Verifica a operadora de um número de telefone, corrigindo a lógica
-    para números fixos de 10 dígitos e celulares incompletos no formato brasileiro.
-    """
-    if pd.isna(numero) or str(numero).strip() == "":
-        return ""
-
-    numero_str = str(numero).strip()
-
-    # 1. Padronização do número
-    if numero_str.startswith('+'):
-        numero_completo = numero_str
-        numero_limpo = ''.join(filter(str.isdigit, numero_str[1:]))
-    else:
-        numero_limpo = ''.join(filter(str.isdigit, numero_str))
-        numero_completo = "+55" + numero_limpo
-
-    if len(numero_limpo) < 10:
-        return "Inválido (Curto)"
-
-    parsed_number = None
-    
-    try:
-        # 2. Primeira Tentativa de Parseamento (como está)
-        parsed_number = phonenumbers.parse(numero_completo, "BR")
-
-        if not phonenumbers.is_valid_number(parsed_number):
-            # 3. Segunda Tentativa: Correção do '9' para celulares incompletos (10 dígitos)
-            if len(numero_limpo) == 10 and numero_limpo[2] != '9':
-                numero_limpo_corrigido = numero_limpo[:2] + '9' + numero_limpo[2:]
-                numero_completo_corrigido = "+55" + numero_limpo_corrigido
-                parsed_number_corrigido = phonenumbers.parse(numero_completo_corrigido, "BR")
-
-                if phonenumbers.is_valid_number(parsed_number_corrigido):
-                    parsed_number = parsed_number_corrigido
-                else:
-                    return "Inválido (Corrigido Falhou)"
-            else:
-                return "Inválido (Formato)"
-
-    except Exception:
-        return "Inválido (Erro Parsing)"
-
-    # 4. Verificação da Operadora
-    if parsed_number is None:
-        return "Inválido (Erro Interno)"
-
-    operadora = carrier.name_for_number(parsed_number, "pt")
-
-    if not operadora:
-        n_type = number_type(parsed_number)
-        if n_type == PhoneNumberType.FIXED_LINE:
-            return "Linha Fixa"
-        elif n_type == PhoneNumberType.MOBILE:
-            return "Celular (Operadora não identificada)"
-        return "Operadora Não Encontrada"
-
-    # Retorna o nome da operadora em MAIÚSCULAS para padronização no agrupamento
-    return operadora.upper()
+# --- Logging ---
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(SCRIPT_DIR / "separador_operadora.log", encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 
-def processar_e_separar_arquivo(caminho_arquivo):
-    """
-    Lê um arquivo Excel, aplica a verificação de operadora,
-    separa por operadora e salva em arquivos CSV.
-    """
-    nome_arquivo = os.path.basename(caminho_arquivo)
-    print(f"\nProcessando arquivo: {nome_arquivo}")
+def processar_e_separar_arquivo(caminho_arquivo: Path):
+    """Lê Excel, aplica verificação de operadora e separa em CSVs por operadora."""
+    logger.info(f"Processando: {caminho_arquivo.name}")
 
     try:
-        # Lendo como string para preservar CNPJ, TELEFONE e evitar notação científica
-        df = pd.read_excel(caminho_arquivo, dtype=str)
+        df = pd.read_excel(str(caminho_arquivo), dtype=str)
     except Exception as e:
-        print(f"Erro ao ler o arquivo {nome_arquivo}: {e}")
+        logger.error(f"Erro ao ler {caminho_arquivo.name}: {e}")
         return
 
-    # 1. Identificar a Coluna de Telefone (bruta)
-    coluna_telefone_bruto = None
-    for col in df.columns:
-        if TELEFONE_COLUMN_HINT.lower() in str(col).lower():
-            coluna_telefone_bruto = col
-            break
+    # Localiza coluna de telefone (case-insensitive)
+    coluna_telefone = next(
+        (col for col in df.columns if TELEFONE_COLUMN_HINT.lower() in col.lower()),
+        None
+    )
 
-    if not coluna_telefone_bruto:
-        print(f"Aviso: Coluna contendo '{TELEFONE_COLUMN_HINT}' não encontrada em {nome_arquivo}.")
+    if not coluna_telefone:
+        logger.warning(f"Coluna '{TELEFONE_COLUMN_HINT}' não encontrada em {caminho_arquivo.name}.")
         return
-    
-    # Prepara a lista final de colunas a serem extraídas
-    colunas_para_extracao = [c for c in COLUNAS_DESEJADAS if c != 'Telefone']
-    colunas_para_extracao.append(coluna_telefone_bruto)
 
+    # Valida colunas esperadas na saída (avisa sobre as ausentes)
+    colunas_base = [c for c in COLUNAS_DESEJADAS if c not in ('Operadora', 'Telefone')]
+    ausentes = [c for c in colunas_base if c not in df.columns]
+    if ausentes:
+        logger.warning(f"Colunas ausentes (serão ignoradas): {ausentes}")
 
-    # 2. Aplicar a verificação de operadora
-    print(f"Iniciando a consulta de operadora ({len(df)} linhas)...")
-    df['Operadora'] = df[coluna_telefone_bruto].progress_apply(verificar_operadora)
+    logger.info(f"Consultando operadora para {len(df)} linhas...")
+    df['Operadora'] = df[coluna_telefone].progress_apply(verificar_operadora)
 
-    # 3. Iterar e salvar por operadora
     operadoras_unicas = df['Operadora'].unique()
+    logger.info(f"Separando em {len(operadoras_unicas)} grupos de operadora...")
 
-    print(f"Separando e salvando dados por operadora (Total de {len(operadoras_unicas)} grupos)...")
+    # Colunas disponíveis para extração (sem 'Telefone' — será renomeada)
+    colunas_para_extracao = [c for c in COLUNAS_DESEJADAS if c not in ('Operadora', 'Telefone') and c in df.columns]
+    colunas_para_extracao += ['Operadora', coluna_telefone]
 
     for operadora in operadoras_unicas:
-        # Limpa o nome para o arquivo
-        nome_operadora_limpo = "".join(c for c in str(operadora) if c.isalnum() or c in (' ', '_', '-')).strip().replace(' ', '_')
-        
-        # Filtra o DataFrame e cria uma cópia
-        df_operadora = df[df['Operadora'] == operadora].copy()
-        
-        if df_operadora.empty:
-            continue
-        
-        # Seleciona as colunas na ordem desejada
-        df_saida = df_operadora[colunas_para_extracao]
-        
-        # Renomeia a coluna de telefone bruto para 'Telefone'
-        df_saida = df_saida.rename(columns={coluna_telefone_bruto: 'Telefone'})
+        df_op = df[df['Operadora'] == operadora][colunas_para_extracao].copy()
 
-        # Cria o nome do arquivo de saída
-        base_nome, _ = os.path.splitext(nome_arquivo)
-        nome_saida = f"{base_nome}__{nome_operadora_limpo}.csv"
-        caminho_saida = os.path.join(OUTPUT_FOLDER, nome_saida)
-        
-        # Salva como CSV (delimitador ';')
+        if df_op.empty:
+            continue
+
+        df_op = df_op.rename(columns={coluna_telefone: 'Telefone'})
+
+        nome_limpo = "".join(
+            c for c in str(operadora) if c.isalnum() or c in (' ', '_', '-')
+        ).strip().replace(' ', '_')
+
+        nome_saida = f"{caminho_arquivo.stem}__{nome_limpo}.csv"
+        caminho_saida = OUTPUT_FOLDER / nome_saida
+
         try:
-            df_saida.to_csv(caminho_saida, index=False, sep=';', encoding='utf-8-sig')
-            print(f"  -> Salvo: {nome_saida} ({len(df_saida)} linhas)")
+            df_op.to_csv(str(caminho_saida), index=False, sep=';', encoding='utf-8-sig')
+            logger.info(f"Salvo: {nome_saida} ({len(df_op)} linhas)")
         except Exception as e:
-            print(f"Erro ao salvar {nome_saida}: {e}")
-            
-    print(f"Concluído o processamento de {nome_arquivo}.")
+            logger.error(f"Erro ao salvar {nome_saida}: {e}")
+
+    logger.info(f"Concluído: {caminho_arquivo.name}")
 
 
 def main():
-    # Cria as pastas se não existirem
-    os.makedirs(INPUT_FOLDER, exist_ok=True)
-    os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+    arquivos = [f for f in INPUT_FOLDER.iterdir() if f.suffix in ('.xlsx', '.xls')]
 
-    # Lista todos os arquivos Excel na pasta de entrada
-    arquivos_excel = [os.path.join(INPUT_FOLDER, f) for f in os.listdir(INPUT_FOLDER) if f.endswith(('.xlsx', '.xls'))]
-
-    if not arquivos_excel:
-        print(f"Nenhum arquivo Excel encontrado na pasta '{INPUT_FOLDER}'.")
-        print(f"Certifique-se de que seus arquivos .xlsx ou .xls estão lá.")
+    if not arquivos:
+        logger.warning(f"Nenhum arquivo Excel encontrado em '{INPUT_FOLDER}'.")
+        logger.info(f"Coloque seus arquivos .xlsx ou .xls em: {INPUT_FOLDER.resolve()}")
         return
 
-    print(f"Encontrados {len(arquivos_excel)} arquivos para processar.")
-    print(f"Os arquivos CSV de saída serão salvos na pasta '{OUTPUT_FOLDER}'.")
+    logger.info(f"Encontrados {len(arquivos)} arquivos. Saída em: {OUTPUT_FOLDER.resolve()}")
 
-    for arquivo in arquivos_excel:
+    for arquivo in arquivos:
         processar_e_separar_arquivo(arquivo)
 
-    print("\n---")
-    print("✅ Todos os arquivos foram processados e separados por operadora!")
-    print(f"Os arquivos de saída estão na pasta '{OUTPUT_FOLDER}'.")
-    print("---")
+    logger.info("Todos os arquivos processados e separados por operadora.")
 
 
 if __name__ == "__main__":
