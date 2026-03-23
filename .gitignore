@@ -179,3 +179,17 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+# Pipeline — dados de execução (nunca versionar)
+audit.jsonl
+scripts/etapa_1/dados_prospect/
+scripts/etapa_2/Consultar/
+scripts/etapa_2/Consultado/
+scripts/etapa_2/Dados do cokpit/
+scripts/etapa_3/arquivos_de_entrada/
+scripts/etapa_3/arquivos_com_operadora/
+scripts/etapa_4/entrada/
+scripts/etapa_4/saida/
+
+# Logs operacionais dos scripts
+scripts/**/*.log

@@ -1,23 +1,31 @@
 import pandas as pd
 import re
 import os
-import glob
 import sys
 import logging
 from pathlib import Path
-from collections import defaultdict
+from dotenv import load_dotenv
+
+_ROOT = Path(__file__).parent.parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+load_dotenv(_ROOT / ".env")
+
+from config.classificacao import MEI_APROVADOS, DEMAIS_APROVADOS
+from utils.audit_logger import AuditTimer, registrar_erro
 
 # --- CONFIGURAÇÃO DE CAMINHOS ---
-# Usa o diretório do próprio script como base (portável entre máquinas)
 SCRIPT_DIR = Path(__file__).parent
 PASTA_DADOS_ENTRADA = SCRIPT_DIR / "dados_prospect"
 PASTA_DADOS_SAIDA = PASTA_DADOS_ENTRADA
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 PASTA_DADOS_ENTRADA.mkdir(exist_ok=True)
 
 # --- LOGGING ---
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler(SCRIPT_DIR / "separador.log", encoding='utf-8'),
@@ -25,6 +33,8 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+SCRIPT_NAME = "1-separacao-prospect"
 
 
 # --- FUNÇÕES DE SUPORTE ---
@@ -41,29 +51,15 @@ def extrair_analise_credito(enriquecimento: str) -> str:
 
 
 def classificar_cliente(descricao: str) -> str:
-    """Classifica a descrição em 'MEI', 'DEMAIS' ou 'DESCARTAR'."""
+    """Classifica a descrição em 'MEI', 'DEMAIS' ou 'DESCARTAR'.
+    
+    As regras de elegibilidade estão centralizadas em config/classificacao.py.
+    """
     if not isinstance(descricao, str):
         return "DESCARTAR"
-
-    mei_aprovados = {
-        "Cliente MEI com alta probabilidade de aprovação",
-        "Cliente MEI com média probabilidade de aprovação",
-        "Cliente MEI com altissíma probabilidade de aprovação"
-    }
-    demais_clientes_aprovados = {
-        "Cliente com altissíma probabilidade de aprovação",
-        "Cliente com média probabilidade de aprovação",
-        "Cliente aprovado até R$ 1700.00",
-        "Cliente aprovado até R$ 3000.00",
-        "Cliente aprovado até R$ 4000.00",
-        "Cliente aprovado até R$ 1500.00",
-        "Cliente aprovado com mais de R$ 5000,00",
-        "Cliente aprovado até R$ 5000.00"
-    }
-
-    if descricao in mei_aprovados:
+    if descricao in MEI_APROVADOS:
         return "MEI"
-    if descricao in demais_clientes_aprovados:
+    if descricao in DEMAIS_APROVADOS:
         return "DEMAIS"
     return "DESCARTAR"
 
@@ -109,7 +105,7 @@ def extrair_sigla_uf(nome_arquivo_base: str) -> str:
     return "UF_INDEFINIDA"
 
 
-def processar_arquivo_prospect(caminho_arquivo: Path):
+def processar_arquivo_prospect(caminho_arquivo: Path, dry_run: bool = False):
     """Lê um CSV, classifica prospects em MEI/DEMAIS e salva em Excel."""
     nome_base = caminho_arquivo.stem
     uf_sigla = extrair_sigla_uf(nome_base)
@@ -120,6 +116,7 @@ def processar_arquivo_prospect(caminho_arquivo: Path):
         df_origem = pd.read_csv(str(caminho_arquivo), delimiter=';', encoding='latin1')
     except Exception as e:
         logger.error(f"Erro ao ler {caminho_arquivo.name}: {e}")
+        registrar_erro(SCRIPT_NAME, f"Erro ao ler arquivo: {e}", arquivo=caminho_arquivo.name)
         return
 
     if 'ENRIQUECIMENTO' not in df_origem.columns:
@@ -130,6 +127,9 @@ def processar_arquivo_prospect(caminho_arquivo: Path):
     df_origem['CLASSIFICACAO'] = df_origem['CHAVE_AGRUPAMENTO'].apply(classificar_cliente)
 
     df_filtrado = df_origem[df_origem['CLASSIFICACAO'] != 'DESCARTAR'].copy()
+    total = len(df_origem)
+    elegíveis = len(df_filtrado)
+    descartados = total - elegíveis
 
     if df_filtrado.empty:
         logger.warning("Nenhum cliente elegível encontrado. Nenhum arquivo gerado.")
@@ -137,6 +137,15 @@ def processar_arquivo_prospect(caminho_arquivo: Path):
 
     df_mei = df_filtrado[df_filtrado['CLASSIFICACAO'] == 'MEI'].drop(columns=['CLASSIFICACAO'])
     df_demais = df_filtrado[df_filtrado['CLASSIFICACAO'] == 'DEMAIS'].drop(columns=['CLASSIFICACAO'])
+
+    logger.info(
+        f"{caminho_arquivo.name}: {total} registros | "
+        f"MEI={len(df_mei)} | DEMAIS={len(df_demais)} | DESCARTADOS={descartados}"
+    )
+
+    if dry_run:
+        logger.info("[DRY-RUN] Nenhum arquivo gerado.")
+        return
 
     if not df_mei.empty:
         resumo_mei = df_mei['CHAVE_AGRUPAMENTO'].value_counts().reset_index()
@@ -162,8 +171,14 @@ def processar_arquivo_prospect(caminho_arquivo: Path):
 # --- FUNÇÃO PRINCIPAL ---
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Separação e classificação de prospects.")
+    parser.add_argument("--dry-run", action="store_true", help="Valida inputs sem gerar arquivos de saída.")
+    args = parser.parse_args()
+
     if not PASTA_DADOS_ENTRADA.is_dir():
         logger.error(f"Pasta de entrada não encontrada: {PASTA_DADOS_ENTRADA}")
+        registrar_erro(SCRIPT_NAME, f"Pasta de entrada não encontrada: {PASTA_DADOS_ENTRADA}")
         sys.exit(1)
 
     arquivos_csv = list(PASTA_DADOS_ENTRADA.glob("*.csv"))
@@ -172,10 +187,22 @@ def main():
         logger.warning(f"Nenhum arquivo .csv encontrado em: {PASTA_DADOS_ENTRADA}")
         sys.exit(0)
 
+    if args.dry_run:
+        logger.info(f"[DRY-RUN] {len(arquivos_csv)} arquivo(s) encontrado(s). Nenhum arquivo será gerado.")
+
     logger.info(f"Encontrados {len(arquivos_csv)} arquivos. Iniciando processamento...")
 
-    for caminho_arquivo in arquivos_csv:
-        processar_arquivo_prospect(caminho_arquivo)
+    with AuditTimer(SCRIPT_NAME) as timer:
+        timer.total = len(arquivos_csv)
+        timer.processados = 0
+        timer.falhas = 0
+        for caminho_arquivo in arquivos_csv:
+            try:
+                processar_arquivo_prospect(caminho_arquivo, dry_run=args.dry_run)
+                timer.processados += 1
+            except Exception as e:
+                logger.error(f"Falha inesperada em {caminho_arquivo.name}: {e}")
+                timer.falhas += 1
 
     logger.info(f"Processamento concluído. Saída em: {PASTA_DADOS_SAIDA.resolve()}")
 
